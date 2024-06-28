@@ -1,121 +1,264 @@
-1.什么是Web Server（网络服务器）
-2.用户如何与你的Web服务器进行通信
-3.Web服务器如何接收客户端发来的HTTP请求报文呢
-4.Web服务器如何处理以及响应接收到的HTTP请求报文呢
-5.数据库连接池是如何运行的
-6.什么是CGI校验
-7.生成HTTP响应并返回给用户
-8.服务器优化：定时器处理非活动链接
-9.服务器优化：日志
-10.压测（非常关键）
-11.这个服务器的不足在哪（希望大家可以献计献策）
-12.如何在此基础添加功能把社长的变成自己的（小声儿bb）
-参考资料
-预备知识：通读一遍《Linux高性能服务器编程》— 游双著
-
-本文将带你从本人的小白视角，从头到尾彻底理解社长的TinyWebServer项目，明白每个部分都发生了什么，你的服务器程序又是如何处理，如何响应（response）来自客户端的用户请求的（requests）。
-
-1. 什么是Web Server（网络服务器）
-一个Web Server就是一个服务器软件（程序），或者是运行这个服务器软件的硬件（计算机）。其主要功能是通过HTTP协议与客户端（通常是浏览器（Browser））进行通信，来接收，存储，处理来自客户端的HTTP请求，并对其请求做出HTTP响应，返回给客户端其请求的内容（文件、网页等）或返回一个Error信息。
-
-https://developer.mozilla.org/en-US/docs/Learn/Common_questions/What_is_a_web_server
-https://developer.mozilla.org/en-US/docs/Learn/Common_questions/What_is_a_web_server
 
 
-2. 用户如何与你的Web服务器进行通信
-通常用户使用Web浏览器与相应服务器进行通信。在浏览器中键入“域名”或“IP地址:端口号”，浏览器则先将你的域名解析成相应的IP地址或者直接根据你的IP地址向对应的Web服务器发送一个HTTP请求。这一过程首先要通过TCP协议的三次握手建立与目标Web服务器的连接，然后HTTP协议生成针对目标Web服务器的HTTP请求报文，通过TCP、IP等协议发送到目标Web服务器上。
+TinyWebServer
+===============
+Linux下C++轻量级Web服务器，助力初学者快速实践网络编程，搭建属于自己的服务器.
 
-3. Web服务器如何接收客户端发来的HTTP请求报文呢?
-Web服务器端通过socket监听来自用户的请求。
+* 使用 **线程池 + 非阻塞socket + epoll(ET和LT均实现) + 事件处理(Reactor和模拟Proactor均实现)** 的并发模型
+* 使用**状态机**解析HTTP请求报文，支持解析**GET和POST**请求
+* 访问服务器数据库实现web端用户**注册、登录**功能，可以请求服务器**图片和视频文件**
+* 实现**同步/异步日志系统**，记录服务器运行状态
+* 经Webbench压力测试可以实现**上万的并发连接**数据交换
 
-服务器程序通常需要处理三类事件：I/O事件，信号及定时事件。有两种事件处理模式：
 
-Reactor模式：要求主线程（I/O处理单元）只负责监听文件描述符上是否有事件发生（可读、可写），若有，则立即通知工作线程（逻辑单元），将socket可读可写事件放入请求队列，交给工作线程处理。
-Proactor模式：将所有的I/O操作都交给主线程和内核来处理（进行读、写），工作线程仅负责处理逻辑，如主线程读完成后users[sockfd].read()，选择一个工作线程来处理客户请求pool->append(users + sockfd)。
-通常使用同步I/O模型（如epoll_wait）实现Reactor，使用异步I/O（如aio_read和aio_write）实现Proactor。但在此项目中，我们使用的是同步I/O模拟的Proactor事件处理模式。那么什么是同步I/O，什么是异步I/O呢？
-廖雪峰：异步IO一节给出解释
+写在前面
+----
+* 本项目开发维护过程中，很多童鞋曾发红包支持，我都一一谢绝。我现在不会，将来也不会将本项目包装成任何课程售卖，更不会开通任何支持通道。
+* 目前网络上有人或对本项目，或对游双大佬的项目包装成课程售卖。请各位童鞋擦亮眼，辨识各大学习/求职网站的C++服务器项目，不要盲目付费。
+* 有面试官大佬通过项目信息在公司内找到我，发现很多童鞋简历上都用了这个项目。但，在面试过程中发现`很多童鞋通过本项目入门了，但是对于一些东西还是属于知其然不知其所以然的状态，需要加强下基础知识的学习`，推荐认真阅读下
+    * 《unix环境高级编程》
+    * 《unix网络编程》
+* 感谢各位大佬，各位朋友，各位童鞋的认可和支持。如果本项目能带你入门，将是我莫大的荣幸。
 
-同步（阻塞）I/O：在一个线程中，CPU执行代码的速度极快，然而，一旦遇到IO操作，如读写文件、发送网络数据时，就需要等待IO操作完成，才能继续进行下一步操作。这种情况称为同步IO。
-异步（非阻塞）I/O：当代码需要执行一个耗时的IO操作时，它只发出IO指令，并不等待IO结果，然后就去执行其他代码了。一段时间后，当IO返回结果时，再通知CPU进行处理。
-Linux下有三种IO复用方式：epoll，select和poll，为什么用epoll，它和其他两个有什么区别呢？（参考StackOverflow上的一个问题：Why is epoll faster than select?）
 
-对于select和poll来说，所有文件描述符都是在用户态被加入其文件描述符集合的，每次调用都需要将整个集合拷贝到内核态；epoll则将整个文件描述符集合维护在内核态，每次添加文件描述符的时候都需要执行一个系统调用。系统调用的开销是很大的，而且在有很多短期活跃连接的情况下，epoll可能会慢于select和poll由于这些大量的系统调用开销。
-select使用线性表描述文件描述符集合，文件描述符有上限；poll使用链表来描述；epoll底层通过红黑树来描述，并且维护一个ready list，将事件表中已经就绪的事件添加到这里，在使用epoll_wait调用时，仅观察这个list中有没有数据即可。
-select和poll的最大开销来自内核判断是否有文件描述符就绪这一过程：每次执行select或poll调用时，它们会采用遍历的方式，遍历整个文件描述符集合去判断各个文件描述符是否有活动；epoll则不需要去以这种方式检查，当有活动产生时，会自动触发epoll回调函数通知epoll文件描述符，然后内核将这些就绪的文件描述符放到之前提到的ready list中等待epoll_wait调用后被处理。
-select和poll都只能工作在相对低效的LT模式下，而epoll同时支持LT和ET模式。
-综上，当监测的fd数量较小，且各个fd都很活跃的情况下，建议使用select和poll；当监听的fd数量较多，且单位时间仅部分fd活跃的情况下，使用epoll会明显提升性能。
-Epoll对文件操作符的操作有两种模式：LT（电平触发）和ET（边缘触发），二者的区别在于当你调用epoll_wait的时候内核里面发生了什么：
+目录
+-----
 
-LT（电平触发）：类似select，LT会去遍历在epoll事件表中每个文件描述符，来观察是否有我们感兴趣的事件发生，如果有（触发了该文件描述符上的回调函数），epoll_wait就会以非阻塞的方式返回。若该epoll事件没有被处理完（没有返回EWOULDBLOCK），该事件还会被后续的epoll_wait再次触发。
-ET（边缘触发）：ET在发现有我们感兴趣的事件发生后，立即返回，并且sleep这一事件的epoll_wait，不管该事件有没有结束。
-在使用ET模式时，必须要保证该文件描述符是非阻塞的（确保在没有数据可读时，该文件描述符不会一直阻塞）；并且每次调用read和write的时候都必须等到它们返回EWOULDBLOCK（确保所有数据都已读完或写完）。
+| [概述](#概述) | [框架](#框架) | [Demo演示](#Demo演示) | [压力测试](#压力测试) |[更新日志](#更新日志) |[源码下载](#源码下载) | [快速运行](#快速运行) | [个性化运行](#个性化运行) | [庖丁解牛](#庖丁解牛) | [CPP11实现](#CPP11实现) |[致谢](#致谢) |
+|:--------:|:--------:|:--------:|:--------:|:--------:|:--------:|:--------:|:--------:|:--------:|:--------:|:--------:|
 
-4. Web服务器如何处理以及响应接收到的HTTP请求报文呢?
-该项目使用线程池（半同步半反应堆模式）并发处理用户请求，主线程负责读写，工作线程（线程池中的线程）负责处理逻辑（HTTP请求报文的解析等等）。通过之前的代码，我们将listenfd上到达的connection通过 accept()接收，并返回一个新的socket文件描述符connfd用于和用户通信，并对用户请求返回响应，同时将这个connfd注册到内核事件表中，等用户发来请求报文。这个过程是：通过epoll_wait发现这个connfd上有可读事件了（EPOLLIN），主线程就将这个HTTP的请求报文读进这个连接socket的读缓存中users[sockfd].read()，然后将该任务对象（指针）插入线程池的请求队列中pool->append(users + sockfd);，线程池的实现还需要依靠锁机制以及信号量机制来实现线程同步，保证操作的原子性。
-在线程池部分做几点解释，然后大家去看代码的时候就更容易看懂了：
 
-所谓线程池，就是一个pthread_t类型的普通数组，通过pthread_create()函数创建m_thread_number个线程，用来执行worker()函数以执行每个请求处理函数（HTTP请求的process函数），通过pthread_detach()将线程设置成脱离态（detached）后，当这一线程运行结束时，它的资源会被系统自动回收，而不再需要在其它线程中对其进行 pthread_join() 操作。
-操作工作队列一定要加锁（locker），因为它被所有线程共享。
-我们用信号量来标识请求队列中的请求数，通过m_queuestat.wait();来等待一个请求队列中待处理的HTTP请求，然后交给线程池中的空闲线程来处理。
-为什么要使用线程池？
-当你需要限制你应用程序中同时运行的线程数时，线程池非常有用。因为启动一个新线程会带来性能开销，每个线程也会为其堆栈分配一些内存等。为了任务的并发执行，我们可以将这些任务任务传递到线程池，而不是为每个任务动态开启一个新的线程。
+概述
+----------
 
-:star:线程池中的线程数量是依据什么确定的？
+> * C/C++
+> * B/S模型
+> * [线程同步机制包装类](https://github.com/qinguoyi/TinyWebServer/tree/master/lock)
+> * [http连接请求处理类](https://github.com/qinguoyi/TinyWebServer/tree/master/http)
+> * [半同步/半反应堆线程池](https://github.com/qinguoyi/TinyWebServer/tree/master/threadpool)
+> * [定时器处理非活动连接](https://github.com/qinguoyi/TinyWebServer/tree/master/timer)
+> * [同步/异步日志系统 ](https://github.com/qinguoyi/TinyWebServer/tree/master/log)  
+> * [数据库连接池](https://github.com/qinguoyi/TinyWebServer/tree/master/CGImysql) 
+> * [同步线程注册和登录校验](https://github.com/qinguoyi/TinyWebServer/tree/master/CGImysql) 
+> * [简易服务器压力测试](https://github.com/qinguoyi/TinyWebServer/tree/master/test_presure)
 
-在StackOverflow上面发现了一个还不错的回答，意思是：
-线程池中的线程数量最直接的限制因素是中央处理器(CPU)的处理器(processors/cores)的数量N：如果你的CPU是4-cores的，对于CPU密集型的任务(如视频剪辑等消耗CPU计算资源的任务)来说，那线程池中的线程数量最好也设置为4（或者+1防止其他因素造成的线程阻塞）；对于IO密集型的任务，一般要多于CPU的核数，因为线程间竞争的不是CPU的计算资源而是IO，IO的处理一般较慢，多于cores数的线程将为CPU争取更多的任务，不至在线程处理IO的过程造成CPU空闲导致资源浪费，公式：最佳线程数 = CPU当前可使用的Cores数 * 当前CPU的利用率 * (1 + CPU等待时间 / CPU处理时间)（还有回答里面提到的Amdahl准则可以了解一下）
 
-OK，接下来说说每个read()后的HTTP请求是如何被处理的，我们直接看这个处理HTTP请求的入口函数：
+框架
+-------------
+<div align=center><img src="http://ww1.sinaimg.cn/large/005TJ2c7ly1ge0j1atq5hj30g60lm0w4.jpg" height="765"/> </div>
 
-最直观的区别就是GET把参数包含在URL中，POST通过request body传递参数。
-GET请求参数会被完整保留在浏览器历史记录里，而POST中的参数不会被保留。
-GET请求在URL中传送的参数是有长度限制。（大多数）浏览器通常都会限制url长度在2K个字节，而（大多数）服务器最多处理64K大小的url。
-GET产生一个TCP数据包；POST产生两个TCP数据包。对于GET方式的请求，浏览器会把http header和data一并发送出去，服务器响应200（返回数据）；而对于POST，浏览器先发送header，服务器响应100（指示信息—表示请求已接收，继续处理）continue，浏览器再发送data，服务器响应200 ok（返回数据）。
-参考社长的文章：最新版Web服务器项目详解 - 05 http连接处理（中）
-process_read()函数的作用就是将类似上述例子的请求报文进行解析，因为用户的请求内容包含在这个请求报文里面，只有通过解析，知道用户请求的内容是什么，是请求图片，还是视频，或是其他请求，我们根据这些请求返回相应的HTML页面等。项目中使用主从状态机的模式进行解析，从状态机（parse_line）负责读取报文的一行，主状态机负责对该行数据进行解析，主状态机内部调用从状态机，从状态机驱动主状态机。每解析一部分都会将整个请求的m_check_state状态改变，状态机也就是根据这个状态来进行不同部分的解析跳转的：
+Demo演示
+----------
+> * 注册演示
 
-parse_request_line(text)，解析请求行，也就是GET中的GET /562f25980001b1b106000338.jpg HTTP/1.1这一行，或者POST中的POST / HTTP1.1这一行。通过请求行的解析我们可以判断该HTTP请求的类型（GET/POST），而请求行中最重要的部分就是URL部分，我们会将这部分保存下来用于后面的生成HTTP响应。
-parse_headers(text);，解析请求头部，GET和POST中空行以上，请求行以下的部分。
-parse_content(text);，解析请求数据，对于GET来说这部分是空的，因为这部分内容已经以明文的方式包含在了请求行中的URL部分了；只有POST的这部分是有数据的，项目中的这部分数据为用户名和密码，我们会根据这部分内容做登录和校验，并涉及到与数据库的连接。
-OK，经过上述解析，当得到一个完整的，正确的HTTP请求时，就到了do_request代码部分，我们需要首先对GET请求和不同POST请求（登录，注册，请求图片，视频等等）做不同的预处理，然后分析目标文件的属性，若目标文件存在、对所有用户可读且不是目录时，则使用mmap将其映射到内存地址m_file_address处，并告诉调用者获取文件成功。
+<div align=center><img src="http://ww1.sinaimg.cn/large/005TJ2c7ly1ge0iz0dkleg30m80bxjyj.gif" height="429"/> </div>
 
-抛开mmap这部分，先来看看这些不同请求是怎么来的：
-假设你已经搭好了你的HTTP服务器，然后你在本地浏览器中键入localhost:9000，然后回车，这时候你就给你的服务器发送了一个GET请求，什么都没做，然后服务器端就会解析你的这个HTTP请求，然后发现是个GET请求，然后返回给你一个静态HTML页面，也就是项目中的judge.html页面，那POST请求怎么来的呢？这时你会发现，返回的这个judge页面中包含着一些新用户和已有账号这两个button元素，当你用鼠标点击这个button时，你的浏览器就会向你的服务器发送一个POST请求，服务器段通过检查action来判断你的POST请求类型是什么，进而做出不同的响应。
+> * 登录演示
 
-5. 数据库连接池是如何运行的
-在处理用户注册，登录请求的时候，我们需要将这些用户的用户名和密码保存下来用于新用户的注册及老用户的登录校验，相信每个人都体验过，当你在一个网站上注册一个用户时，应该经常会遇到“您的用户名已被使用”，或者在登录的时候输错密码了网页会提示你“您输入的用户名或密码有误”等等类似情况，这种功能是服务器端通过用户键入的用户名密码和数据库中已记录下来的用户名密码数据进行校验实现的。若每次用户请求我们都需要新建一个数据库连接，请求结束后我们释放该数据库连接，当用户请求连接过多时，这种做法过于低效，所以类似线程池的做法，我们构建一个数据库连接池，预先生成一些数据库连接放在那里供用户请求使用。
-(找不到mysql/mysql.h头文件的时候，需要安装一个库文件：sudo apt install libmysqlclient-dev)
-我们首先看单个数据库连接是如何生成的：
+<div align=center><img src="https://github.com/qinguoyi/TinyWebServer/blob/master/root/login.gif" height="429"/> </div>
 
-使用mysql_init()初始化连接
-使用mysql_real_connect()建立一个到mysql数据库的连接
-使用mysql_query()执行查询语句
-使用result = mysql_store_result(mysql)获取结果集
-使用mysql_num_fields(result)获取查询的列数，mysql_num_rows(result)获取结果集的行数
-通过mysql_fetch_row(result)不断获取下一行，然后循环输出
-使用mysql_free_result(result)释放结果集所占内存
-使用mysql_close(conn)关闭连接
-对于一个数据库连接池来讲，就是预先生成多个这样的数据库连接，然后放在一个链表中，同时维护最大连接数MAX_CONN，当前可用连接数FREE_CONN和当前已用连接数CUR_CONN这三个变量。同样注意在对连接池操作时（获取，释放），要用到锁机制，因为它被所有线程共享。
+> * 请求图片文件演示(6M)
 
-6. 什么是CGI校验
-OK，弄清楚了数据库连接池的概念及实现方式，我们继续回到第4部分，对用户的登录及注册等POST请求，服务器是如何做校验的。当点击新用户按钮时，服务器对这个POST请求的响应是：返回用户一个登录界面；当你在用户名和密码框中输入后，你的POST请求报文中会连同你的用户名密码一起发给服务器，然后我们拿着你的用户名和密码在数据库连接池中取出一个连接用于mysql_query()进行查询，逻辑很简单，同步线程校验SYNSQL方式相信大家都能明白，但是这里社长又给出了其他两种校验方式，CGI什么的，就很容易让小白一时摸不到头脑，接下来就简单解释一下CGI是什么。
+<div align=center><img src="http://ww1.sinaimg.cn/large/005TJ2c7ly1ge0juxrnlfg30go07x4qr.gif" height="429"/> </div>
 
-CGI（通用网关接口），它是一个运行在Web服务器上的程序，在编译的时候将相应的.cpp文件编程成.cgi文件并在主程序中调用即可（通过社长的makefile文件内容也可以看出）。这些CGI程序通常通过客户在其浏览器上点击一个button时运行。这些程序通常用来执行一些信息搜索、存储等任务，而且通常会生成一个动态的HTML网页来响应客户的HTTP请求。我们可以发现项目中的sign.cpp文件就是我们的CGI程序，将用户请求中的用户名和密码保存在一个id_passwd.txt文件中，通过将数据库中的用户名和密码存到一个map中用于校验。在主程序中通过execl(m_real_file, &flag, name, password, NULL);这句命令来执行这个CGI文件，这里CGI程序仅用于校验，并未直接返回给用户响应。这个CGI程序的运行通过多进程来实现，根据其返回结果判断校验结果（使用pipe进行父子进程的通信，子进程将校验结果写到pipe的写端，父进程在读端读取）。
+> * 请求视频文件演示(39M)
 
-7. 生成HTTP响应并返回给用户
-通过以上操作，我们已经对读到的请求做好了处理，然后也对目标文件的属性作了分析，若目标文件存在、对所有用户可读且不是目录时，则使用mmap将其映射到内存地址m_file_address处，并告诉调用者获取文件成功FILE_REQUEST。 接下来要做的就是根据读取结果对用户做出响应了，也就是到了process_write(read_ret);这一步，该函数根据process_read()的返回结果来判断应该返回给用户什么响应，我们最常见的就是404错误了，说明客户请求的文件不存在，除此之外还有其他类型的请求出错的响应，具体的可以去百度。然后呢，假设用户请求的文件存在，而且已经被mmap到m_file_address这里了，那么我们就将做如下写操作，将响应写到这个connfd的写缓存m_write_buf中去：
+<div align=center><img src="http://ww1.sinaimg.cn/large/005TJ2c7ly1ge0jtxie8ng30go07xb2b.gif" height="429"/> </div>
 
-首先将状态行写入写缓存，响应头也是要写进connfd的写缓存（HTTP类自己定义的，与socket无关）中的，对于请求的文件，我们已经直接将其映射到m_file_address里面，然后将该connfd文件描述符上修改为EPOLLOUT（可写）事件，然后epoll_Wait监测到这一事件后，使用writev来将响应信息和请求文件聚集写到TCP Socket本身定义的发送缓冲区（这个缓冲区大小一般是默认的，但我们也可以通过setsockopt来修改）中，交由内核发送给用户。OVER！
 
-8. 服务器优化：定时器处理非活动链接
-项目中，我们预先分配了MAX_FD个http连接对象：
-环发出实际访问请求，父子进程通过管道进行通信，子进程通过管道写端向父进程传递在若干次请求访问完毕后记录到的总信息，父进程通过管道读端读取子进程发来的相关信息，子进程在时间到后结束，父进程在所有子进程退出后统计并给用户显示最后的测试结果，然后退出。
+压力测试
+-------------
+在关闭日志后，使用Webbench对服务器进行压力测试，对listenfd和connfd分别采用ET和LT模式，均可实现上万的并发连接，下面列出的是两者组合后的测试结果. 
 
-11. 这个服务器的不足在哪（希望大家可以献计献策）
-待完善。
+> * Proactor，LT + LT，93251 QPS
 
-12. 如何在此基础添加功能把社长的变成自己的（小声儿bb）
-到目前为止，你已经把社长的项目完整的理解了一遍，甚至把各部分怎么实现的背了下来，但是这仍然是社长的项目，你没有做什么改进，你甚至没有把定时器的实现改成时间轮模式自己去动手做一做，而我们应该自己动手这个项目中的一些不足的地方，去优化它，或者再此基础上实现一些新的功能，让它多少有点自己的东西在里面。下面对此提出几点可以做的方向，后面我如果做出来的话也会更新在这里。
+<div align=center><img src="http://ww1.sinaimg.cn/large/005TJ2c7ly1gfjqu2hptkj30gz07474n.jpg" height="201"/> </div>
 
-添加文件上传功能，实现与服务器的真正交互。
-试着调用摄像头，来实现一些更有趣的功能。
+> * Proactor，LT + ET，97459 QPS
+
+<div align=center><img src="http://ww1.sinaimg.cn/large/005TJ2c7ly1gfjr1xppdgj30h206zdg6.jpg" height="201"/> </div>
+
+> * Proactor，ET + LT，80498 QPS
+
+<div align=center><img src="http://ww1.sinaimg.cn/large/005TJ2c7ly1gfjr24vmjtj30gz0720t3.jpg" height="201"/> </div>
+
+> * Proactor，ET + ET，92167 QPS
+
+<div align=center><img src="http://ww1.sinaimg.cn/large/005TJ2c7ly1gfjrflrebdj30gz06z0t3.jpg" height="201"/> </div>
+
+> * Reactor，LT + ET，69175 QPS
+
+<div align=center><img src="http://ww1.sinaimg.cn/large/005TJ2c7ly1gfjr1humcbj30h207474n.jpg" height="201"/> </div>
+
+> * 并发连接总数：10500
+> * 访问服务器时间：5s
+> * 所有访问均成功
+
+**注意：** 使用本项目的webbench进行压测时，若报错显示webbench命令找不到，将可执行文件webbench删除后，重新编译即可。
+
+更新日志
+-------
+- [x] 解决请求服务器上大文件的Bug
+- [x] 增加请求视频文件的页面
+- [x] 解决数据库同步校验内存泄漏
+- [x] 实现非阻塞模式下的ET和LT触发，并完成压力测试
+- [x] 完善`lock.h`中的封装类，统一使用该同步机制
+- [x] 改进代码结构，更新局部变量懒汉单例模式
+- [x] 优化数据库连接池信号量与代码结构
+- [x] 使用RAII机制优化数据库连接的获取与释放
+- [x] 优化代码结构，封装工具类以减少全局变量
+- [x] 编译一次即可，命令行进行个性化测试更加友好
+- [x] main函数封装重构
+- [x] 新增命令行日志开关，关闭日志后更新压力测试结果
+- [x] 改进编译方式，只配置一次SQL信息即可
+- [x] 新增Reactor模式，并完成压力测试
+
+源码下载
+-------
+目前有两个版本，版本间的代码结构有较大改动，文档和代码运行方法也不一致。重构版本更简洁，原始版本(raw_version)更大保留游双代码的原汁原味，从原始版本更容易入手.
+
+如果遇到github代码下载失败，或访问太慢，可以从以下链接下载，与Github最新提交同步.
+
+* 重构版本下载地址 : [BaiduYun](https://pan.baidu.com/s/1PozKji8Oop-1BYcfixZR0g)
+    *  提取码 : vsqq
+* 原始版本(raw_version)下载地址 : [BaiduYun](https://pan.baidu.com/s/1asMNDW-zog92DZY1Oa4kaQ)
+    * 提取码 : 9wye
+    * 原始版本运行请参考[原始文档](https://github.com/qinguoyi/TinyWebServer/tree/raw_version)
+
+快速运行
+------------
+* 服务器测试环境
+	* Ubuntu版本16.04
+	* MySQL版本5.7.29
+* 浏览器测试环境
+	* Windows、Linux均可
+	* Chrome
+	* FireFox
+	* 其他浏览器暂无测试
+
+* 测试前确认已安装MySQL数据库
+
+    ```C++
+    // 建立yourdb库
+    create database yourdb;
+
+    // 创建user表
+    USE yourdb;
+    CREATE TABLE user(
+        username char(50) NULL,
+        passwd char(50) NULL
+    )ENGINE=InnoDB;
+
+    // 添加数据
+    INSERT INTO user(username, passwd) VALUES('name', 'passwd');
+    ```
+
+* 修改main.cpp中的数据库初始化信息
+
+    ```C++
+    //数据库登录名,密码,库名
+    string user = "root";
+    string passwd = "root";
+    string databasename = "yourdb";
+    ```
+
+* build
+
+    ```C++
+    sh ./build.sh
+    ```
+
+* 启动server
+
+    ```C++
+    ./server
+    ```
+
+* 浏览器端
+
+    ```C++
+    ip:9006
+    ```
+
+个性化运行
+------
+
+```C++
+./server [-p port] [-l LOGWrite] [-m TRIGMode] [-o OPT_LINGER] [-s sql_num] [-t thread_num] [-c close_log] [-a actor_model]
+```
+
+温馨提示:以上参数不是非必须，不用全部使用，根据个人情况搭配选用即可.
+
+* -p，自定义端口号
+	* 默认9006
+* -l，选择日志写入方式，默认同步写入
+	* 0，同步写入
+	* 1，异步写入
+* -m，listenfd和connfd的模式组合，默认使用LT + LT
+	* 0，表示使用LT + LT
+	* 1，表示使用LT + ET
+    * 2，表示使用ET + LT
+    * 3，表示使用ET + ET
+* -o，优雅关闭连接，默认不使用
+	* 0，不使用
+	* 1，使用
+* -s，数据库连接数量
+	* 默认为8
+* -t，线程数量
+	* 默认为8
+* -c，关闭日志，默认打开
+	* 0，打开日志
+	* 1，关闭日志
+* -a，选择反应堆模型，默认Proactor
+	* 0，Proactor模型
+	* 1，Reactor模型
+
+测试示例命令与含义
+
+```C++
+./server -p 9007 -l 1 -m 0 -o 1 -s 10 -t 10 -c 1 -a 1
+```
+
+- [x] 端口9007
+- [x] 异步写入日志
+- [x] 使用LT + LT组合
+- [x] 使用优雅关闭连接
+- [x] 数据库连接池内有10条连接
+- [x] 线程池内有10条线程
+- [x] 关闭日志
+- [x] Reactor反应堆模型
+
+庖丁解牛
+------------
+近期版本迭代较快，以下内容多以旧版本(raw_version)代码为蓝本进行详解.
+
+* [小白视角：一文读懂社长的TinyWebServer](https://huixxi.github.io/2020/06/02/%E5%B0%8F%E7%99%BD%E8%A7%86%E8%A7%92%EF%BC%9A%E4%B8%80%E6%96%87%E8%AF%BB%E6%87%82%E7%A4%BE%E9%95%BF%E7%9A%84TinyWebServer/#more)
+* [最新版Web服务器项目详解 - 01 线程同步机制封装类](https://mp.weixin.qq.com/s?__biz=MzAxNzU2MzcwMw==&mid=2649274278&idx=3&sn=5840ff698e3f963c7855d702e842ec47&chksm=83ffbefeb48837e86fed9754986bca6db364a6fe2e2923549a378e8e5dec6e3cf732cdb198e2&scene=0&xtrack=1#rd)
+* [最新版Web服务器项目详解 - 02 半同步半反应堆线程池（上）](https://mp.weixin.qq.com/s?__biz=MzAxNzU2MzcwMw==&mid=2649274278&idx=4&sn=caa323faf0c51d882453c0e0c6a62282&chksm=83ffbefeb48837e841a6dbff292217475d9075e91cbe14042ad6e55b87437dcd01e6d9219e7d&scene=0&xtrack=1#rd)
+* [最新版Web服务器项目详解 - 03 半同步半反应堆线程池（下）](https://mp.weixin.qq.com/s/PB8vMwi8sB4Jw3WzAKpWOQ)
+* [最新版Web服务器项目详解 - 04 http连接处理（上）](https://mp.weixin.qq.com/s/BfnNl-3jc_x5WPrWEJGdzQ)
+* [最新版Web服务器项目详解 - 05 http连接处理（中）](https://mp.weixin.qq.com/s/wAQHU-QZiRt1VACMZZjNlw)
+* [最新版Web服务器项目详解 - 06 http连接处理（下）](https://mp.weixin.qq.com/s/451xNaSFHxcxfKlPBV3OCg)
+* [最新版Web服务器项目详解 - 07 定时器处理非活动连接（上）](https://mp.weixin.qq.com/s/mmXLqh_NywhBXJvI45hchA)
+* [最新版Web服务器项目详解 - 08 定时器处理非活动连接（下）](https://mp.weixin.qq.com/s/fb_OUnlV1SGuOUdrGrzVgg)
+* [最新版Web服务器项目详解 - 09 日志系统（上）](https://mp.weixin.qq.com/s/IWAlPzVDkR2ZRI5iirEfCg)
+* [最新版Web服务器项目详解 - 10 日志系统（下）](https://mp.weixin.qq.com/s/f-ujwFyCe1LZa3EB561ehA)
+* [最新版Web服务器项目详解 - 11 数据库连接池](https://mp.weixin.qq.com/s?__biz=MzAxNzU2MzcwMw==&mid=2649274326&idx=1&sn=5af78e2bf6552c46ae9ab2aa22faf839&chksm=83ffbe8eb4883798c3abb82ddd124c8100a39ef41ab8d04abe42d344067d5e1ac1b0cac9d9a3&token=1450918099&lang=zh_CN#rd)
+* [最新版Web服务器项目详解 - 12 注册登录](https://mp.weixin.qq.com/s?__biz=MzAxNzU2MzcwMw==&mid=2649274431&idx=4&sn=7595a70f06a79cb7abaebcd939e0cbee&chksm=83ffb167b4883871ce110aeb23e04acf835ef41016517247263a2c3ab6f8e615607858127ea6&token=1686112912&lang=zh_CN#rd)
+* [最新版Web服务器项目详解 - 13 踩坑与面试题](https://mp.weixin.qq.com/s?__biz=MzAxNzU2MzcwMw==&mid=2649274431&idx=1&sn=2dd28c92f5d9704a57c001a3d2630b69&chksm=83ffb167b48838715810b27b8f8b9a576023ee5c08a8e5d91df5baf396732de51268d1bf2a4e&token=1686112912&lang=zh_CN#rd)
+* 已更新完毕
+
+Star History
+---------
+[![Star History Chart](https://api.star-history.com/svg?repos=qinguoyi/TinyWebServer&type=Date)](https://star-history.com/#qinguoyi/TinyWebServer&Date)
+
+CPP11实现
+------------
+更简洁，更优雅的CPP11实现：[Webserver](https://github.com/markparticle/WebServer)
+
+
+致谢
+------------
+Linux高性能服务器编程，游双著.
+
+感谢以下朋友的PR和帮助: [@RownH](https://github.com/RownH)，[@mapleFU](https://github.com/mapleFU)，[@ZWiley](https://github.com/ZWiley)，[@zjuHong](https://github.com/zjuHong)，[@mamil](https://github.com/mamil)，[@byfate](https://github.com/byfate)，[@MaJun827](https://github.com/MaJun827)，[@BBLiu-coder](https://github.com/BBLiu-coder)，[@smoky96](https://github.com/smoky96)，[@yfBong](https://github.com/yfBong)，[@liuwuyao](https://github.com/liuwuyao)，[@Huixxi](https://github.com/Huixxi)，[@markparticle](https://github.com/markparticle)，[@blogg9ggg](https://github.com/Blogg9ggg).
